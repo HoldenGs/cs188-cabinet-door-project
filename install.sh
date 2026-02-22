@@ -67,16 +67,30 @@ info "Using $PYTHON ($PY_VERSION)"
 # ─── Check system dependencies (Linux/WSL) ─────────────────────────
 
 if [ "$PLATFORM" = "linux" ]; then
+    sudo apt-get update -qq
+
+    apt_has_candidate() {
+        apt-cache policy "$1" 2>/dev/null | awk -F': ' '/Candidate:/ {print $2}' | grep -vq '(none)'
+    }
+
+    PKGS=(git cmake build-essential python3-dev linux-libc-dev libosmesa6-dev libglew-dev)
+
+    if apt_has_candidate libgl1-mesa-glx; then
+        PKGS+=(libgl1-mesa-glx)
+    else
+        PKGS+=(libgl1 libglx-mesa0)
+    fi
+
     MISSING_PKGS=()
-    for pkg in git cmake libgl1-mesa-glx libosmesa6-dev libglew-dev; do
+    for pkg in "${PKGS[@]}"; do
         if ! dpkg -s "$pkg" &>/dev/null; then
             MISSING_PKGS+=("$pkg")
         fi
     done
-    if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+
+    if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
         warn "Missing system packages: ${MISSING_PKGS[*]}"
         info "Installing with apt (may need sudo)..."
-        sudo apt-get update -qq
         sudo apt-get install -y -qq "${MISSING_PKGS[@]}"
     fi
 fi
@@ -93,12 +107,26 @@ else
 fi
 
 # Activate
-# shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 info "Activated virtual environment"
 
+VENV_PY="$VENV_DIR/bin/python"
+VENV_PIP="$VENV_PY -m pip"
+
+# Make sure pip exists in the venv (some distros create venvs without pip)
+"$VENV_PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
+$VENV_PIP install --upgrade pip --quiet
+
+# Avoid conda poisoning native builds (evdev, mujoco deps, etc.)
+unset CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
+export CC=/usr/bin/gcc
+export CXX=/usr/bin/g++
+export PATH="/usr/bin:$PATH"
+
 # Upgrade pip
-pip install --upgrade pip --quiet
+$VENV_PIP install --upgrade pip --quiet
+
+$VENV_PIP install --quiet "numpy==2.2.5"
 
 # ─── Clone and install robosuite ────────────────────────────────────
 
@@ -110,7 +138,7 @@ else
 fi
 
 info "Installing robosuite..."
-pip install -e "$REPO_DIR/robosuite" --quiet
+$VENV_PIP install -e "$REPO_DIR/robosuite" --quiet
 
 # ─── Clone and install robocasa ─────────────────────────────────────
 
@@ -122,12 +150,13 @@ else
 fi
 
 info "Installing robocasa..."
-pip install -e "$REPO_DIR/robocasa" --quiet
+$VENV_PIP install -e "$REPO_DIR/robocasa" --quiet
 
 # ─── Install additional Python dependencies ─────────────────────────
 
 info "Installing additional dependencies..."
-pip install --quiet \
+$VENV_PIP install --quiet "numpy<2"
+$VENV_PIP install --quiet \
     torch torchvision \
     matplotlib \
     pyarrow \
@@ -139,12 +168,12 @@ pip install --quiet \
 
 info "Downloading RoboCasa kitchen assets (~5 GB)..."
 info "This may take a while on a slow connection."
-python -m robocasa.scripts.download_kitchen_assets
+"$VENV_PY" -m robocasa.scripts.download_kitchen_assets
 
 # ─── Set up macros ──────────────────────────────────────────────────
 
 info "Setting up RoboCasa macros..."
-python -m robocasa.scripts.setup_macros
+"$VENV_PY" -m robocasa.scripts.setup_macros
 
 # ─── Platform-specific notes ────────────────────────────────────────
 
