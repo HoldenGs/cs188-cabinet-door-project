@@ -1,0 +1,11 @@
+[project]
+name = "robocasa-door-policy"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.uv]
+# This prevents uv from trying to "manage" the subfolders as part of your project
+workspace = { exclude = ["robosuite", "robocasa"] }
