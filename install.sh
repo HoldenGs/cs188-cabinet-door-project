@@ -126,8 +126,6 @@ export PATH="/usr/bin:$PATH"
 # Upgrade pip
 $VENV_PIP install --upgrade pip --quiet
 
-$VENV_PIP install --quiet "numpy==2.2.5"
-
 # ─── Clone and install robosuite ────────────────────────────────────
 
 if [ -d "$REPO_DIR/robosuite" ]; then
@@ -137,7 +135,7 @@ else
     git clone https://github.com/ARISE-Initiative/robosuite.git "$REPO_DIR/robosuite"
 fi
 
-info "Installing robosuite..."
+info "Installing robosuite (this will likely pull NumPy 1.x)..."
 $VENV_PIP install -e "$REPO_DIR/robosuite" --quiet
 
 # ─── Clone and install robocasa ─────────────────────────────────────
@@ -152,10 +150,17 @@ fi
 info "Installing robocasa..."
 $VENV_PIP install -e "$REPO_DIR/robocasa" --quiet
 
+# ─── The "Intentional Override" ─────────────────────────────────────
+# We MUST force NumPy 2.2.5 last. Pip will print a scary red ERROR 
+# complaining about the mink dependency conflict. This is expected 
+# and necessary to make RoboCasa work.
+
+info "Resolving NumPy version conflict (EXPECT A PIP ERROR HERE)..."
+$VENV_PIP install "numpy==2.2.5" "opencv-python-headless>=4.10" --quiet
+
 # ─── Install additional Python dependencies ─────────────────────────
 
 info "Installing additional dependencies..."
-$VENV_PIP install --quiet "numpy<2"
 $VENV_PIP install --quiet \
     torch torchvision \
     matplotlib \
