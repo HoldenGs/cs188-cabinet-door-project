@@ -4,7 +4,9 @@ Step 3: Teleoperate the Robot to Collect Demonstrations
 Opens an interactive window where you control the PandaOmron robot
 with your keyboard (or SpaceMouse) to open cabinet doors.
 
-This gives you intuition for the task and generates demonstration data.
+This gives you hands-on intuition for the task. Note: this script does
+NOT save demonstration data to disk. To get training data, run
+04_download_dataset.py to download the pre-collected dataset.
 
 Usage:
     # Mac users MUST use mjpython for the rendering window
@@ -30,14 +32,30 @@ Keyboard Controls:
         B       - Toggle between arm control and base control
 
     Recording:
-        Q       - End the current episode
+        Q       - Discard the current episode
 """
+
+import os
+import sys
+
+# ── WSLg / XWayland GL setup ────────────────────────────────────────────────
+# Must happen BEFORE mujoco (or any GL library) is imported.
+# MuJoCo's C extension loads libGL at import time; env vars set after that
+# have no effect.  On WSLg the Mesa D3D12 GPU path often fails with
+# gladLoadGL; llvmpipe (software) reliably provides OpenGL 4.5.
+if os.environ.get("WAYLAND_DISPLAY"):
+    if not os.environ.get("DISPLAY", "").startswith(":"):
+        os.environ["DISPLAY"] = ":0"
+    os.environ.setdefault("GALLIUM_DRIVER", "llvmpipe")
+    os.environ.setdefault("MESA_GL_VERSION_OVERRIDE", "4.5")
+# ────────────────────────────────────────────────────────────────────────────
 
 import argparse
 import time
 from copy import deepcopy
 
 import numpy as np
+import robocasa  # noqa: F401 - registers environments including OpenCabinet
 import robosuite
 from robosuite.controllers import load_composite_controller_config
 from robosuite.wrappers import VisualizationWrapper
@@ -60,7 +78,8 @@ def collect_trajectory(env, device, mirror_actions=True, max_fr=30):
     if lang is not None:
         print(f"  Task: {lang}")
 
-    # Counter: task must be successful for 15 consecutive timesteps
+    # Counter: task must be successful for 15 consecutive timesteps.
+    # Counts down from 14 to 0, then breaks on the next check (= 15 steps total).
     task_completion_hold_count = -1
     device.start_control()
     nonzero_ac_seen = False
@@ -132,7 +151,7 @@ def collect_trajectory(env, device, mirror_actions=True, max_fr=30):
             if task_completion_hold_count > 0:
                 task_completion_hold_count -= 1
             else:
-                task_completion_hold_count = 15
+                task_completion_hold_count = 14
         else:
             task_completion_hold_count = -1
 
@@ -145,6 +164,46 @@ def collect_trajectory(env, device, mirror_actions=True, max_fr=30):
 
     success = not discard_traj
     return success
+
+
+def _check_display():
+    """Exit early with helpful instructions if no X display is available."""
+    display = os.environ.get("DISPLAY", "")
+    wayland = os.environ.get("WAYLAND_DISPLAY", "")
+
+    if wayland:
+        # WSLg is running. It provides XWayland at :0, which both pynput
+        # (X11-based) and MuJoCo's GLFW viewer need.
+        if not display or not display.startswith(":"):
+            os.environ["DISPLAY"] = ":0"
+        # Force Mesa software rendering (llvmpipe) for the GLFW window.
+        # WSLg's Mesa D3D12 GPU path often fails with gladLoadGL; llvmpipe
+        # is slower but reliably provides OpenGL 4.5 for the viewer.
+        os.environ.setdefault("GALLIUM_DRIVER", "llvmpipe")
+        os.environ.setdefault("MESA_GL_VERSION_OVERRIDE", "4.5")
+        return
+
+    if display:
+        # Some X display is claimed — let MuJoCo's own error handling deal
+        # with actual render failures.
+        return
+
+    # Nothing set at all.
+    print("ERROR: This script requires a display (X server) for the MuJoCo viewer")
+    print("       and keyboard input. No display environment variable is set.")
+    print()
+    print("Windows 11 (WSLg — recommended, no extra software needed):")
+    print("  WSLg provides a built-in display. If DISPLAY is not set, try:")
+    print("  export DISPLAY=:0")
+    print()
+    print("Windows 10 / VcXsrv:")
+    print("  1. Launch XLaunch, on 'Extra settings' uncheck 'Native opengl'")
+    print("     and check 'Disable access control'")
+    print("  2. export DISPLAY=$(grep nameserver /etc/resolv.conf | awk '{print $2}'):0.0")
+    print("  3. export LIBGL_ALWAYS_INDIRECT=0")
+    print()
+    print("Note: steps 01, 02, 04-07 do NOT require a display.")
+    sys.exit(1)
 
 
 def main():
@@ -164,6 +223,8 @@ def main():
     )
     args = parser.parse_args()
 
+    _check_display()
+
     print("=" * 60)
     print("  OpenCabinet - Teleoperation Demo Collection")
     print("=" * 60)
@@ -173,7 +234,7 @@ def main():
     print("  Z/X/T/G/C/V  - Rotate arm")
     print("  E             - Toggle gripper")
     print("  B             - Toggle arm/base control mode")
-    print("  Q             - End episode")
+    print("  Q             - Discard the current episode")
     print()
 
     # Create the environment

@@ -242,6 +242,8 @@ def train_simple_policy(config):
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     best_loss = float("inf")
+    avg_loss = float("inf")
+    ckpt_path = os.path.join(checkpoint_dir, "best_policy.pt")
     for epoch in range(config["epochs"]):
         epoch_loss = 0.0
         num_batches = 0
