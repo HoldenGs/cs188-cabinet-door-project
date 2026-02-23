@@ -43,12 +43,26 @@ fi
 # ─── Check Python ──────────────────────────────────────────────────
 
 PYTHON=""
-for candidate in python3.12 python3.11 python3; do
-    if command -v "$candidate" &>/dev/null; then
-        PYTHON="$candidate"
-        break
-    fi
-done
+# On Linux/WSL prefer system Python over conda Python.
+# Conda's libstdc++ is too old for the system osmesa library (GLIBCXX conflict),
+# which breaks MuJoCo offscreen rendering. System Python links against the
+# system libstdc++ and loads osmesa without any conflict.
+if [ "$PLATFORM" = "linux" ]; then
+    for candidate in /usr/bin/python3.12 /usr/bin/python3.11 /usr/bin/python3.10 \
+                     python3.12 python3.11 python3.10 python3; do
+        if [ -x "$candidate" ] || command -v "$candidate" &>/dev/null; then
+            PYTHON="$candidate"
+            break
+        fi
+    done
+else
+    for candidate in python3.12 python3.11 python3; do
+        if command -v "$candidate" &>/dev/null; then
+            PYTHON="$candidate"
+            break
+        fi
+    done
+fi
 
 if [ -z "$PYTHON" ]; then
     error "Python 3.10+ not found. Please install Python 3.10, 3.11, or 3.12."
@@ -73,7 +87,7 @@ if [ "$PLATFORM" = "linux" ]; then
         apt-cache policy "$1" 2>/dev/null | awk -F': ' '/Candidate:/ {print $2}' | grep -vq '(none)'
     }
 
-    PKGS=(git cmake build-essential python3-dev linux-libc-dev libosmesa6-dev libglew-dev)
+    PKGS=(git cmake build-essential python3-dev linux-libc-dev libosmesa6-dev libglew-dev "python${PY_VERSION}-venv")
 
     if apt_has_candidate libgl1-mesa-glx; then
         PKGS+=(libgl1-mesa-glx)
@@ -147,7 +161,7 @@ else
     git clone https://github.com/robocasa/robocasa.git "$REPO_DIR/robocasa"
 fi
 
-info "Installing robocasa..."
+info "Installing robocasa... (Expect Mink to complain about Numpy version here)"
 $VENV_PIP install -e "$REPO_DIR/robocasa" --quiet
 
 # ─── The "Intentional Override" ─────────────────────────────────────
@@ -155,7 +169,7 @@ $VENV_PIP install -e "$REPO_DIR/robocasa" --quiet
 # complaining about the mink dependency conflict. This is expected 
 # and necessary to make RoboCasa work.
 
-info "Resolving NumPy version conflict (EXPECT A PIP ERROR HERE)..."
+info "Resolving NumPy version conflict..."
 $VENV_PIP install "numpy==2.2.5" "opencv-python-headless>=4.10" --quiet
 
 # ─── Install additional Python dependencies ─────────────────────────
@@ -167,18 +181,19 @@ $VENV_PIP install --quiet \
     pyarrow \
     imageio[ffmpeg] \
     jupyter \
-    ipykernel
+    ipykernel \
+    pyopengl pyopengl-accelerate
 
 # ─── Download kitchen assets ────────────────────────────────────────
 
-info "Downloading RoboCasa kitchen assets (~5 GB)..."
+info "Downloading RoboCasa kitchen assets (~10 GB)..."
 info "This may take a while on a slow connection."
-"$VENV_PY" -m robocasa.scripts.download_kitchen_assets
+"$VENV_PY" "$REPO_DIR/robocasa/robocasa/scripts/download_kitchen_assets.py"
 
 # ─── Set up macros ──────────────────────────────────────────────────
 
 info "Setting up RoboCasa macros..."
-"$VENV_PY" -m robocasa.scripts.setup_macros
+"$VENV_PY" "$REPO_DIR/robocasa/robocasa/scripts/setup_macros.py"
 
 # ─── Platform-specific notes ────────────────────────────────────────
 
@@ -203,9 +218,12 @@ if [ "$PLATFORM" = "macos" ]; then
 fi
 
 if [ "$PLATFORM" = "linux" ]; then
-    echo "NOTE (headless Linux/WSL): If you have no display, set:"
+    echo "NOTE (headless Linux/WSL): Set these before running scripts:"
     echo ""
-    echo "  export MUJOCO_GL=egl    # for GPU rendering"
-    echo "  export MUJOCO_GL=osmesa # for CPU rendering"
+    echo "  export MUJOCO_GL=osmesa             # CPU rendering (WSL2 without GPU)"
+    echo "  export PYOPENGL_PLATFORM=osmesa"
+    echo ""
+    echo "  Or for GPU rendering (requires EGL_PLATFORM_DEVICE support):"
+    echo "  export MUJOCO_GL=egl"
     echo ""
 fi

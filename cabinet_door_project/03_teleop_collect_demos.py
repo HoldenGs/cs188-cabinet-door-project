@@ -38,16 +38,39 @@ Keyboard Controls:
 import os
 import sys
 
-# ── WSLg / XWayland GL setup ────────────────────────────────────────────────
-# Must happen BEFORE mujoco (or any GL library) is imported.
-# MuJoCo's C extension loads libGL at import time; env vars set after that
-# have no effect.  On WSLg the Mesa D3D12 GPU path often fails with
-# gladLoadGL; llvmpipe (software) reliably provides OpenGL 4.5.
-if os.environ.get("WAYLAND_DISPLAY"):
-    if not os.environ.get("DISPLAY", "").startswith(":"):
-        os.environ["DISPLAY"] = ":0"
-    os.environ.setdefault("GALLIUM_DRIVER", "llvmpipe")
-    os.environ.setdefault("MESA_GL_VERSION_OVERRIDE", "4.5")
+# ── WSLg / XWayland GL setup — re-exec approach ─────────────────────────────
+# On WSLg (Windows 11) the .bashrc often sets DISPLAY to a stale VcXsrv-style
+# "IP:0" address, and Mesa's D3D12 GPU path fails with gladLoadGL on XWayland.
+#
+# Setting os.environ inside a running Python process is NOT reliable: C
+# libraries (Mesa, GLFW) may read the env at dlopen() time which happens
+# during import, before our code runs.  The only guaranteed fix is to restart
+# the process with the correct vars already in the OS-level environment.
+#
+# We use os.execve() to atomically replace this process with an identical one
+# that has the correct vars from the very start.  A sentinel env var prevents
+# the new process from re-execing again.
+if sys.platform == "linux" and "__TELEOP_DISPLAY_OK" not in os.environ:
+    _env = dict(os.environ)
+    _changed = False
+
+    if _env.get("WAYLAND_DISPLAY"):
+        # WSLg: force XWayland socket display and Mesa software renderer.
+        if not _env.get("DISPLAY", "").startswith(":"):
+            _env["DISPLAY"] = ":0"
+            _changed = True
+        if _env.get("GALLIUM_DRIVER") != "llvmpipe":
+            _env["GALLIUM_DRIVER"] = "llvmpipe"
+            _changed = True
+        if _env.get("MESA_GL_VERSION_OVERRIDE") != "4.5":
+            _env["MESA_GL_VERSION_OVERRIDE"] = "4.5"
+            _changed = True
+
+    if _changed:
+        _env["__TELEOP_DISPLAY_OK"] = "1"
+        os.execve(sys.executable, [sys.executable] + sys.argv, _env)
+    else:
+        os.environ["__TELEOP_DISPLAY_OK"] = "1"
 # ────────────────────────────────────────────────────────────────────────────
 
 import argparse
