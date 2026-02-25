@@ -5,7 +5,15 @@ Checks that all required packages are installed and the OpenCabinet
 environment can be created successfully.
 """
 
+import os
 import sys
+
+# On Linux/WSL2, EGL offscreen rendering requires /dev/dri device access which
+# is unavailable in most WSL environments.  Force osmesa (CPU-based offscreen
+# renderer) so the environment-creation check doesn't require a GPU.
+if sys.platform == "linux":
+    os.environ.setdefault("MUJOCO_GL", "osmesa")
+    os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
 
 
 def check_package(name, min_version=None):

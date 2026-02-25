@@ -10,6 +10,15 @@ Usage:
     python 01_explore_environment.py
 """
 
+import os
+import sys
+
+# Force osmesa (CPU offscreen renderer) on Linux/WSL2 -- EGL requires
+# /dev/dri device access that is unavailable in WSL environments.
+if sys.platform == "linux":
+    os.environ.setdefault("MUJOCO_GL", "osmesa")
+    os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
+
 import numpy as np
 import robocasa  # noqa: F401 - registers environments
 from robocasa.utils.env_utils import create_env

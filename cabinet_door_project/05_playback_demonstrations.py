@@ -16,8 +16,37 @@ Usage:
     python 05_playback_demonstrations.py --num_demos 5 --render_offscreen
 """
 
-import argparse
 import os
+import sys
+
+# ── WSLg / XWayland GL setup — re-exec approach ─────────────────────────────
+# Same fix as 03_teleop_collect_demos.py: on WSLg the .bashrc often sets a
+# stale VcXsrv-style DISPLAY that breaks GLFW.  os.execve() restarts this
+# process with correct env vars baked in at the OS level before any C library
+# (Mesa, GLFW) is initialized.  Sentinel prevents infinite re-exec.
+if sys.platform == "linux" and "__TELEOP_DISPLAY_OK" not in os.environ:
+    _env = dict(os.environ)
+    _changed = False
+
+    if _env.get("WAYLAND_DISPLAY"):
+        if not _env.get("DISPLAY", "").startswith(":"):
+            _env["DISPLAY"] = ":0"
+            _changed = True
+        if _env.get("GALLIUM_DRIVER") != "llvmpipe":
+            _env["GALLIUM_DRIVER"] = "llvmpipe"
+            _changed = True
+        if _env.get("MESA_GL_VERSION_OVERRIDE") != "4.5":
+            _env["MESA_GL_VERSION_OVERRIDE"] = "4.5"
+            _changed = True
+
+    if _changed:
+        _env["__TELEOP_DISPLAY_OK"] = "1"
+        os.execve(sys.executable, [sys.executable] + sys.argv, _env)
+    else:
+        os.environ["__TELEOP_DISPLAY_OK"] = "1"
+# ────────────────────────────────────────────────────────────────────────────
+
+import argparse
 
 import robocasa  # noqa: F401
 from robocasa.scripts.download_datasets import download_datasets

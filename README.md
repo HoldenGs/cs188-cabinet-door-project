@@ -50,7 +50,7 @@ This will:
 - Create a Python virtual environment (`.venv`)
 - Clone and install robosuite and robocasa
 - Install all Python dependencies (PyTorch, numpy, matplotlib, etc.)
-- Download RoboCasa kitchen assets (~5 GB)
+- Download RoboCasa kitchen assets (~10 GB)
 
 After installation, activate the environment:
 

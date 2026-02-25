@@ -26,6 +26,12 @@ import os
 import sys
 import time
 
+# Force osmesa (CPU offscreen renderer) on Linux/WSL2 -- EGL requires
+# /dev/dri device access that is unavailable in WSL environments.
+if sys.platform == "linux":
+    os.environ.setdefault("MUJOCO_GL", "osmesa")
+    os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
+
 import numpy as np
 
 import robocasa  # noqa: F401

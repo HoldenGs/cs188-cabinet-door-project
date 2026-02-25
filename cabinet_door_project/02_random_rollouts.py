@@ -12,6 +12,15 @@ Mac users: use mjpython instead of python for on-screen rendering.
 """
 
 import argparse
+import os
+import sys
+
+# Force osmesa (CPU offscreen renderer) on Linux/WSL2 -- EGL requires
+# /dev/dri device access that is unavailable in WSL environments.
+if sys.platform == "linux":
+    os.environ.setdefault("MUJOCO_GL", "osmesa")
+    os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
+
 import numpy as np
 
 import robocasa  # noqa: F401
