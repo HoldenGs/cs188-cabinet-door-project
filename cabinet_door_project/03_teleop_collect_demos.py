@@ -4,9 +4,16 @@ Step 3: Teleoperate the Robot to Collect Demonstrations
 Opens an interactive window where you control the PandaOmron robot
 with your keyboard (or SpaceMouse) to open cabinet doors.
 
-This gives you hands-on intuition for the task. Note: this script does
-NOT save demonstration data to disk. To get training data, run
-04_download_dataset.py to download the pre-collected dataset.
+This gives you hands-on intuition for the task. Note: in normal mode
+this script does NOT save demonstration data to disk. To get training
+data, run 04_download_dataset.py to download the pre-collected dataset.
+
+DAgger mode (--dagger):
+    The trained policy drives the robot autonomously. Press movement
+    keys to override the policy at any time. All (state, action) pairs
+    are saved as parquet files compatible with the training pipeline in
+    06_train_policy.py. This implements Dataset Aggregation (DAgger) —
+    a simple way to improve a policy by collecting corrections.
 
 Usage:
     # Mac users MUST use mjpython for the rendering window
@@ -18,18 +25,11 @@ Usage:
     # Use spacemouse instead of keyboard
     python 03_teleop_collect_demos.py --device spacemouse
 
-Keyboard Controls:
-    Movement (hold to move):
-        W/S     - Move arm forward / backward
-        A/D     - Move arm left / right
-        R/F     - Move arm up / down
-        Z/X     - Rotate arm (yaw)
-        T/G     - Rotate arm (pitch)
-        C/V     - Rotate arm (roll)
+    # DAgger mode: policy drives, human overrides with keyboard
+    mjpython 03_teleop_collect_demos.py --dagger --checkpoint /tmp/cabinet_policy_checkpoints/best_policy.pt
 
-    Actions:
-        E       - Toggle gripper (open/close)
-        B       - Toggle between arm control and base control
+    # DAgger with custom output directory
+    mjpython 03_teleop_collect_demos.py --dagger --checkpoint best_policy.pt --save_dir data/dagger_round2/chunk-000
 
     Recording:
         Q       - Discard the current episode
@@ -82,6 +82,232 @@ import robocasa  # noqa: F401 - registers environments including OpenCabinet
 import robosuite
 from robosuite.controllers import load_composite_controller_config
 from robosuite.wrappers import VisualizationWrapper
+
+
+# ── Policy loading (copied from 08_visualize_policy_rollout.py) ──────────
+
+
+def load_policy(checkpoint_path, device):
+    """Load the SimplePolicy trained by 06_train_policy.py."""
+    import torch
+    import torch.nn as nn
+
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state_dim = ckpt["state_dim"]
+    action_dim = ckpt["action_dim"]
+
+    class SimplePolicy(nn.Module):
+        def __init__(self, state_dim, action_dim, hidden_dim=256):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(state_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, action_dim),
+                nn.Tanh(),
+            )
+
+        def forward(self, state):
+            return self.net(state)
+
+    model = SimplePolicy(state_dim, action_dim).to(device)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+    return model, state_dim, action_dim, ckpt
+
+
+def extract_state(obs, state_dim):
+    """Flatten non-image observations into a state vector of length state_dim."""
+    parts = []
+    for key in sorted(obs.keys()):
+        val = obs[key]
+        if isinstance(val, np.ndarray) and not key.endswith("_image"):
+            parts.append(val.flatten())
+    if not parts:
+        return np.zeros(state_dim, dtype=np.float32)
+    state = np.concatenate(parts).astype(np.float32)
+    if len(state) < state_dim:
+        state = np.pad(state, (0, state_dim - len(state)))
+    elif len(state) > state_dim:
+        state = state[:state_dim]
+    return state
+
+
+# ── DAgger helpers ───────────────────────────────────────────────────────
+
+
+def save_trajectory_parquet(trajectory, save_dir, episode_index):
+    """
+    Save a list of {state, action} dicts as a parquet file.
+
+    The output schema matches what CabinetDemoDataset in 06_train_policy.py
+    expects: columns ``observation.state`` and ``action``.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    states = [step["state"].tolist() for step in trajectory]
+    actions = [step["action"].tolist() for step in trajectory]
+
+    table = pa.table(
+        {
+            "observation.state": states,
+            "action": actions,
+        }
+    )
+
+    path = os.path.join(save_dir, f"episode_{episode_index:06d}.parquet")
+    pq.write_table(table, path)
+    return path
+
+
+def collect_dagger_trajectory(
+    env, device, model, state_dim, action_dim, torch_device,
+    mirror_actions=True, max_fr=30,
+):
+    """
+    Collect a single DAgger trajectory.
+
+    The trained policy drives the robot. When the human presses movement
+    keys, their input overrides the policy. All (state, action) pairs are
+    recorded regardless of who was in control.
+
+    Returns:
+        (success, trajectory): success bool and list of {state, action} dicts.
+    """
+    import torch
+
+    obs = env.reset()
+
+    ep_meta = env.get_ep_meta()
+    lang = ep_meta.get("lang", None)
+    if lang is not None:
+        print(f"  Task: {lang}")
+
+    task_completion_hold_count = -1
+    device_input = device
+    device_input.start_control()
+
+    # Track gripper state
+    all_prev_gripper_actions = [
+        {
+            f"{robot_arm}_gripper": np.repeat([0], robot.gripper[robot_arm].dof)
+            for robot_arm in robot.arms
+            if robot.gripper[robot_arm].dof > 0
+        }
+        for robot in env.robots
+    ]
+
+    # Dummy step to initialize
+    zero_action = np.zeros(env.action_dim)
+    env.step(zero_action)
+
+    discard_traj = False
+    trajectory = []
+    step_count = 0
+
+    while True:
+        start = time.time()
+
+        active_robot = env.robots[device_input.active_robot]
+
+        # Extract state for policy and recording
+        state = extract_state(obs, state_dim)
+
+        # Get human input
+        input_ac_dict = device_input.input2action(mirror_actions=mirror_actions)
+
+        if input_ac_dict is None:
+            discard_traj = True
+            break
+
+        action_dict = deepcopy(input_ac_dict)
+
+        # Set arm actions based on controller type
+        for arm in active_robot.arms:
+            controller_input_type = active_robot.part_controllers[arm].input_type
+            if controller_input_type == "delta":
+                action_dict[arm] = input_ac_dict[f"{arm}_delta"]
+            elif controller_input_type == "absolute":
+                action_dict[arm] = input_ac_dict[f"{arm}_abs"]
+
+        # Detect human activity: check if right_delta or base actions are non-zero
+        human_active = False
+        right_delta = input_ac_dict.get("right_delta", None)
+        if right_delta is not None and np.any(right_delta != 0):
+            human_active = True
+        base_action = input_ac_dict.get("base", None)
+        if base_action is not None and np.any(base_action != 0):
+            human_active = True
+
+        if human_active:
+            # Human override: build action from human input
+            env_action = [
+                robot.create_action_vector(all_prev_gripper_actions[i])
+                for i, robot in enumerate(env.robots)
+            ]
+            env_action[device_input.active_robot] = (
+                active_robot.create_action_vector(action_dict)
+            )
+            env_action = np.concatenate(env_action)
+        else:
+            # Policy drives: query the model
+            with torch.no_grad():
+                policy_action = model(
+                    torch.from_numpy(state).unsqueeze(0).to(torch_device)
+                ).cpu().numpy().squeeze(0)
+
+            # Pad/trim to environment action dimension
+            env_dim = env.action_dim
+            if len(policy_action) < env_dim:
+                policy_action = np.pad(policy_action, (0, env_dim - len(policy_action)))
+            elif len(policy_action) > env_dim:
+                policy_action = policy_action[:env_dim]
+            env_action = policy_action
+
+        # Step the environment
+        obs, _, _, _ = env.step(env_action)
+
+        # Record (state, action) — trim action to action_dim for training
+        recorded_action = env_action[:action_dim]
+        trajectory.append({"state": state, "action": recorded_action})
+
+        # Status line every 10 steps
+        step_count += 1
+        if step_count % 10 == 0:
+            who = "[HUMAN]" if human_active else "[policy]"
+            print(f"\r  step {step_count:4d}  {who}  "
+                  f"traj_len={len(trajectory)}", end="", flush=True)
+
+        # Check for task completion (15 consecutive success steps)
+        if task_completion_hold_count == 0:
+            break
+
+        if env._check_success():
+            if task_completion_hold_count > 0:
+                task_completion_hold_count -= 1
+            else:
+                task_completion_hold_count = 14
+        else:
+            task_completion_hold_count = -1
+
+        # Frame rate limiting
+        if max_fr is not None:
+            elapsed = time.time() - start
+            diff = 1 / max_fr - elapsed
+            if diff > 0:
+                time.sleep(diff)
+
+    # Clear the \r status line
+    print()
+
+    success = not discard_traj
+    return success, trajectory
 
 
 def collect_trajectory(env, device, mirror_actions=True, max_fr=30):
@@ -244,20 +470,33 @@ def main():
         choices=["keyboard", "spacemouse"],
         help="Input device",
     )
+    parser.add_argument(
+        "--dagger",
+        action="store_true",
+        help="Enable DAgger mode: policy drives, human overrides with keyboard",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to policy checkpoint (.pt) — required with --dagger",
+    )
+    parser.add_argument(
+        "--save_dir",
+        type=str,
+        default="data/dagger/chunk-000",
+        help="Where to save DAgger trajectories (default: data/dagger/chunk-000)",
+    )
     args = parser.parse_args()
+
+    if args.dagger and not args.checkpoint:
+        parser.error("--checkpoint is required when using --dagger")
 
     _check_display()
 
     print("=" * 60)
     print("  OpenCabinet - Teleoperation Demo Collection")
     print("=" * 60)
-    print()
-    print("Controls:")
-    print("  W/S/A/D/R/F  - Move arm (forward/back/left/right/up/down)")
-    print("  Z/X/T/G/C/V  - Rotate arm")
-    print("  E             - Toggle gripper")
-    print("  B             - Toggle arm/base control mode")
-    print("  Q             - Discard the current episode")
     print()
 
     # Create the environment
@@ -301,20 +540,67 @@ def main():
             product_id=macros.SPACEMOUSE_PRODUCT_ID,
         )
 
-    print("\nReady! Move the robot to open the cabinet door.")
-    print("Press Q when done with each episode.\n")
+    # ── DAgger mode setup ──────────────────────────────────────────────────
+    if args.dagger:
+        import torch
 
-    # Collect demonstrations in a loop
+        if not os.path.exists(args.checkpoint):
+            print(f"ERROR: Checkpoint not found: {args.checkpoint}")
+            print("Train a policy first with:  python 06_train_policy.py")
+            sys.exit(1)
+
+        torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model, state_dim, action_dim, ckpt = load_policy(args.checkpoint, torch_device)
+
+        print(f"DAgger mode enabled")
+        print(f"  Checkpoint: {args.checkpoint}")
+        print(f"  Epoch {ckpt['epoch']}, loss {ckpt['loss']:.6f}")
+        print(f"  State dim: {state_dim},  Action dim: {action_dim}")
+        print(f"  Save dir:  {args.save_dir}")
+        print()
+        print("The policy will drive the robot automatically.")
+        print("Press movement keys to override. Press Q to discard an episode.")
+        print()
+
+    # ── Episode loop ─────────────────────────────────────────────────────
+    if not args.dagger:
+        print("\nReady! Move the robot to open the cabinet door.")
+        print("Press Q when done with each episode.\n")
+
     episode = 0
+    saved_count = 0
     try:
         while True:
             episode += 1
             print(f"--- Episode {episode} ---")
-            success = collect_trajectory(env, device, mirror_actions=True, max_fr=30)
-            status = "SUCCESS" if success else "Discarded"
-            print(f"  Result: {status}\n")
+
+            if args.dagger:
+                success, trajectory = collect_dagger_trajectory(
+                    env, device, model, state_dim, action_dim, torch_device,
+                    mirror_actions=True, max_fr=30,
+                )
+                if success and trajectory:
+                    path = save_trajectory_parquet(
+                        trajectory, args.save_dir, saved_count
+                    )
+                    saved_count += 1
+                    print(f"  Result: saved {len(trajectory)} steps -> {path}")
+                else:
+                    print(f"  Result: Discarded")
+            else:
+                success = collect_trajectory(
+                    env, device, mirror_actions=True, max_fr=30
+                )
+                status = "SUCCESS" if success else "Discarded"
+                print(f"  Result: {status}")
+
+            print()
     except KeyboardInterrupt:
-        print("\nTeleoperation ended.")
+        if args.dagger:
+            print(f"\nDAgger collection ended. Saved {saved_count} episodes "
+                  f"to {args.save_dir}")
+        else:
+            print("\nTeleoperation ended.")
     finally:
         env.close()
 

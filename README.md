@@ -13,7 +13,7 @@ robot autonomously.
 1. How robotic manipulation environments are structured (MuJoCo + robosuite + RoboCasa)
 2. How the `OpenCabinet` task works -- sensors, actions, success criteria
 3. How to collect and use demonstration datasets (human + MimicGen)
-4. How to train a visuomotor policy (Diffusion Policy) from demonstrations
+4. How to train a behavior-cloning policy from demonstrations
 5. How to evaluate your trained policy in simulation
 
 ### The robot
@@ -21,20 +21,6 @@ robot autonomously.
 We use the **PandaOmron** mobile manipulator -- a Franka Panda 7-DOF arm
 mounted on an Omron wheeled base with a torso lift joint. This is the default
 and best-supported robot in RoboCasa.
-
-> **Why not the Spot (quadruped)?**  While Boston Dynamics Spot with an arm
-> *does* exist in robosuite (`SpotArm`, 19 DOF via the `LeggedRobot` class),
-> RoboCasa's kitchen environments are tightly coupled to wheeled mobile bases.
-> The Kitchen class assumes joints like `mobilebase0_joint_mobile_forward`,
-> camera rigs parented to `mobilebase0_support`, and placement logic designed
-> for wheeled navigation. Integrating Spot would require modifying:
-> - `robocasa/utils/camera_utils.py` (camera configs)
-> - `robocasa/utils/env_utils.py` (position offsets + `set_robot_base`)
-> - `robocasa/environments/kitchen/kitchen.py` (base control, placement)
->
-> If you want to experiment with Spot outside of RoboCasa, the model is
-> available in robosuite directly or via [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie/tree/main/boston_dynamics_spot)
-> (`spot_arm.xml`).
 
 ---
 
@@ -80,8 +66,9 @@ cabinet_door_project/
   03_teleop_collect_demos.py     # Teleoperate the robot to collect your own demonstrations
   04_download_dataset.py         # Download the pre-collected OpenCabinet dataset
   05_playback_demonstrations.py  # Play back demonstrations to see expert behavior
-  06_train_policy.py             # Train a Diffusion Policy on the demonstration data
+  06_train_policy.py             # Train a simple MLP behavior-cloning policy
   07_evaluate_policy.py          # Evaluate your trained policy in simulation
+  08_visualize_policy_rollout.py # Visualize a rollout of your policy in RoboCasa
   configs/
     diffusion_policy.yaml        # Training hyperparameters
   notebook.ipynb                 # Interactive Jupyter notebook companion
@@ -172,16 +159,25 @@ doors. This is the data your policy will learn from.
 python 06_train_policy.py
 ```
 
-Trains a Diffusion Policy on the demonstration data. The policy learns to map
-camera images and robot state to actions. Training configuration is in
-`configs/diffusion_policy.yaml`.
+Trains a simple MLP behavior-cloning policy on low-dimensional state-action
+pairs from the demonstration data. This is meant to illustrate the
+data-loading → training → checkpoint pipeline, not to produce a policy that
+can reliably solve the task.
 
-For full-scale training, use the official Diffusion Policy repo:
+For a policy that actually works, use one of the official training repos:
+
 ```bash
+# Diffusion Policy (recommended for single-task)
 git clone https://github.com/robocasa-benchmark/diffusion_policy
-cd diffusion_policy
-pip install -e .
+cd diffusion_policy && pip install -e .
 python train.py --config-name=train_diffusion_transformer_bs192 task=robocasa/OpenCabinet
+```
+
+You can also print setup instructions for Diffusion Policy, pi-0, and GR00T
+directly from the script:
+
+```bash
+python 06_train_policy.py --use_diffusion_policy
 ```
 
 ### Step 7: Evaluate Your Policy
@@ -275,6 +271,51 @@ dataset/
   |  - Contact dynamics, rendering, sensors        |
   +------------------------------------------------+
 ```
+
+---
+
+## Research Directions
+
+The MLP baseline in `06_train_policy.py` is intentionally simple — it
+demonstrates the pipeline but will basically always fail. Here are three
+fun directions to improve the model:
+
+### Minimal Diffusion Policy
+
+Replace the direct-regression MLP with a diffusion-based action generator.
+The core loop is to corrupt ground-truth actions with Gaussian noise,
+train the network to predict that noise conditioned on the current state, and
+at inference iteratively denoise from pure noise to produce an action. This
+properly handles multi-modal demonstrations (e.g., approaching the handle from
+the left vs. right) that MSE loss averages into useless mean actions.
+See [Chi et al., 2023](https://diffusion-policy.cs.columbia.edu/) for the
+full approach — a minimal version can be built in ~100 lines on top of the
+existing MLP backbone.
+
+### DAgger (Online Correction)
+
+Script 03 already provides keyboard teleoperation. I have it set up with a DAgger mode that may or may not be kinda buggy. Use it to close the loop:
+train a policy, roll it out, then have a human take over and correct the robot
+whenever it fails. Aggregate these corrections into the training set and
+retrain. This directly attacks distribution shift — the fundamental reason
+offline BC degrades at test time — by collecting data in the states the policy
+actually visits. Even one or two rounds of DAgger can dramatically improve
+robustness. See [Ross et al., 2011](https://arxiv.org/abs/1011.0686).
+
+### Action Chunking
+
+Instead of predicting one action per timestep, predict the next *K* actions at
+once and execute them open-loop before re-planning. This is the key idea behind
+ACT ([Zhao et al., 2023](https://arxiv.org/abs/2304.13705)) and directly fixes
+the jerky, temporally incoherent behavior of single-step BC. Fair warning, though, this will probably require a more sophisticated model (Transformer, Diffusion or other) to provide real benefits. Implementation is
+straightforward: widen the output head to `K * action_dim`, train with the same
+MSE loss over the full chunk, and add a small FIFO buffer at inference. Try
+sweeping K = 4, 8, 16 and compare smoothness and success rate.
+
+### Other Ideas
+- Gaussian Mixture Model for output logits. Can ameliorate the MSE multimodality issue.
+- Vision Transformer. Will need a beefier computer to see benefits but definitely can improve policy at scale.
+- Hooking in an existing VLM and experimenting with zero-shot inference.
 
 ---
 
