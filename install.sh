@@ -78,6 +78,22 @@ fi
 
 info "Using $PYTHON ($PY_VERSION)"
 
+# ─── Check system dependencies (macOS) ────────────────────────────
+
+if [ "$PLATFORM" = "macos" ]; then
+    if ! command -v brew &>/dev/null; then
+        error "Homebrew not found. Install it from https://brew.sh"
+    fi
+    # llvmlite (required by numba) ships with broken @rpath references on
+    # macOS — the dylib needs libz and libc++ but has no rpath entries, so
+    # the loader can't find them. We install zlib via Homebrew and then
+    # patch the dylib to use absolute paths with install_name_tool.
+    if ! brew list zlib &>/dev/null; then
+        info "Installing zlib (required by llvmlite/numba)..."
+        arch -arm64 brew install zlib
+    fi
+fi
+
 # ─── Check system dependencies (Linux/WSL) ─────────────────────────
 
 if [ "$PLATFORM" = "linux" ]; then
@@ -183,6 +199,33 @@ $VENV_PIP install --quiet \
     jupyter \
     ipykernel \
     pyopengl pyopengl-accelerate
+
+# ─── Fix numba/llvmlite broken @rpath on macOS ───────────────────
+# The pip wheels for numba and llvmlite ship .so/.dylib files with
+# @rpath references to libc++ and libz, but the rpaths point to the
+# CI conda environment where they were built (which doesn't exist here).
+# Rewrite every broken reference to use absolute system paths.
+# This MUST run after all pip installs to avoid being overwritten.
+if [ "$PLATFORM" = "macos" ]; then
+    SITE_PKGS="$VENV_DIR/lib/python${PY_VERSION}/site-packages"
+    patched=0
+    for f in $(find "$SITE_PKGS/numba" "$SITE_PKGS/llvmlite" \
+               \( -name '*.so' -o -name '*.dylib' \) 2>/dev/null); do
+        if otool -L "$f" 2>/dev/null | grep -q '@rpath/lib'; then
+            install_name_tool \
+                -change @rpath/libc++.1.dylib /usr/lib/libc++.1.dylib \
+                -change @rpath/libz.1.dylib /opt/homebrew/opt/zlib/lib/libz.1.dylib \
+                "$f" 2>/dev/null
+            # Re-sign with ad-hoc signature; install_name_tool invalidates
+            # the original code signature and macOS kills unsigned binaries.
+            codesign --force --sign - "$f" 2>/dev/null
+            patched=$((patched + 1))
+        fi
+    done
+    if [ "$patched" -gt 0 ]; then
+        info "Patched $patched numba/llvmlite binaries with correct library paths"
+    fi
+fi
 
 # ─── Download kitchen assets ────────────────────────────────────────
 
