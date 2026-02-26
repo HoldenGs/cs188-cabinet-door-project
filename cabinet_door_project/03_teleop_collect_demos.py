@@ -445,7 +445,7 @@ def _check_display():
     print("  WSLg provides a built-in display. If DISPLAY is not set, try:")
     print("  export DISPLAY=:0")
     print()
-    print("Windows 10 / VcXsrv:")
+    print("Windows 10 / VcXsrv (Maybe MacOS too?):")
     print("  1. Launch XLaunch, on 'Extra settings' uncheck 'Native opengl'")
     print("     and check 'Disable access control'")
     print("  2. export DISPLAY=$(grep nameserver /etc/resolv.conf | awk '{print $2}'):0.0")
